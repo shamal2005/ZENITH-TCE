@@ -2072,8 +2072,8 @@ export default function GlobeView({
                   image={img}
                   color={sat.colorProperty as any}
                   scale={isFeatured ? (sat.scaleProperty as any) : 0.75}
-                  width={32}
-                  height={32}
+                  width={96}
+                  height={96}
                 />
               </Entity>
             );
