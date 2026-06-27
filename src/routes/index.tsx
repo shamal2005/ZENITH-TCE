@@ -48,6 +48,10 @@ function Index({ onComplete }: IndexProps = {}) {
   const [spacecraftFocusTrigger, setSpacecraftFocusTrigger] = useState(0);
   const [selectedFeaturedObjectId, setSelectedFeaturedObjectId] = useState<string | null>(null);
   const [isKesslerTransitionComplete, setIsKesslerTransitionComplete] = useState(false);
+  const [kesslerSimState, setKesslerSimState] = useState<'idle' | 'initializing' | 'countdown' | 'frozen' | 'collision_sequence' | 'impact' | 'debris_drifting'>('idle');
+  const [kesslerSimMessage, setKesslerSimMessage] = useState<string>('');
+  const [kesslerCountdown, setKesslerCountdown] = useState<number>(5);
+  const [kesslerCollisionStartTime, setKesslerCollisionStartTime] = useState<number>(0);
 
   useEffect(() => {
     if (currentScreen === 'kessler') {
@@ -60,6 +64,80 @@ function Index({ onComplete }: IndexProps = {}) {
       setIsKesslerTransitionComplete(false);
     }
   }, [currentScreen]);
+
+  useEffect(() => {
+    if (currentScreen !== 'kessler') {
+      setKesslerSimState('idle');
+      setKesslerSimMessage('');
+      setKesslerCountdown(5);
+      setKesslerCollisionStartTime(0);
+    }
+  }, [currentScreen]);
+
+  useEffect(() => {
+    if (kesslerSimState !== 'countdown') return;
+
+    const interval = setInterval(() => {
+      setKesslerCountdown((prev) => {
+        if (prev <= 2) {
+          clearInterval(interval);
+          triggerCollisionSequence();
+          return 1;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [kesslerSimState]);
+
+  const triggerCollisionSequence = () => {
+    setKesslerSimState('frozen');
+    setKesslerCountdown(1);
+
+    // 1.0 second freeze frame right before sequence start
+    setTimeout(() => {
+      setKesslerSimState('collision_sequence');
+      const startTime = Date.now();
+      setKesslerCollisionStartTime(startTime);
+
+      // 0.5s pause + 1.5s approach = 2000ms until impact
+      setTimeout(() => {
+        setKesslerSimState('impact');
+
+        // 800ms impact effects (flash + shake + shockwave)
+        setTimeout(() => {
+          setKesslerSimState('debris_drifting');
+        }, 800);
+
+      }, 2000);
+    }, 1000);
+  };
+
+  const startKesslerSimulation = () => {
+    if (kesslerSimState !== 'idle') return;
+    setKesslerSimState('initializing');
+    
+    const messages = [
+      "Initializing orbital environment...",
+      "Loading orbital trajectories...",
+      "Calculating collision probability...",
+      "Locking collision prediction...",
+      "Simulation initialized."
+    ];
+
+    setKesslerSimMessage(messages[0]);
+
+    setTimeout(() => setKesslerSimMessage(messages[1]), 600);
+    setTimeout(() => setKesslerSimMessage(messages[2]), 1200);
+    setTimeout(() => setKesslerSimMessage(messages[3]), 1800);
+    setTimeout(() => setKesslerSimMessage(messages[4]), 2400);
+
+    setTimeout(() => {
+      setKesslerSimState('countdown');
+      setKesslerCountdown(5);
+    }, 3000);
+  };
 
   const handleSelectSpacecraft = (id: string, triggerFocus = false) => {
     setSelectedSpacecraftId(id);
@@ -316,6 +394,9 @@ function Index({ onComplete }: IndexProps = {}) {
               selectedFeaturedObjectId={selectedFeaturedObjectId}
               onSelectFeaturedObject={setSelectedFeaturedObjectId}
               isKessler={currentScreen === 'kessler'}
+              kesslerSimState={kesslerSimState}
+              kesslerCountdown={kesslerCountdown}
+              kesslerCollisionStartTime={kesslerCollisionStartTime}
             />
             <NavigationPanel 
               active={showGlobe && currentScreen === 'home'} 
@@ -360,6 +441,10 @@ function Index({ onComplete }: IndexProps = {}) {
               onBack={() => {
                 setCurrentScreen('home');
               }}
+              simState={kesslerSimState}
+              simMessage={kesslerSimMessage}
+              simCountdown={kesslerCountdown}
+              onStartSim={startKesslerSimulation}
             />
           </>
         )}

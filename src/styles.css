@@ -1193,7 +1193,7 @@
 .kessler-card {
   position: relative;
   border-radius: 16px;
-  padding: 1.2rem;
+  padding: 1.0rem;
   backdrop-filter: blur(16px) saturate(120%);
   -webkit-backdrop-filter: blur(16px) saturate(120%);
   transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
@@ -1216,4 +1216,38 @@
     inset 0 1px 1px rgba(255, 255, 255, 0.12),
     inset 0 0 16px rgba(168, 85, 247, 0.18),
     0 0 20px rgba(168, 85, 247, 0.22);
+}
+
+@keyframes countdown-pulse {
+  0% {
+    transform: scale(0.7);
+    opacity: 0;
+  }
+  30% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  75% {
+    transform: scale(1.0);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.85);
+    opacity: 0;
+  }
+}
+.animate-countdown {
+  animation: countdown-pulse 1s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+}
+
+@keyframes camera-shake {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  10% { transform: translate(-3px, 2px) rotate(-0.5deg); }
+  30% { transform: translate(3px, -2px) rotate(0.5deg); }
+  50% { transform: translate(-2px, 3px) rotate(0deg); }
+  70% { transform: translate(2px, 2px) rotate(0.5deg); }
+  90% { transform: translate(-1px, -1px) rotate(-0.5deg); }
+}
+.camera-shake-active {
+  animation: camera-shake 0.5s ease-in-out;
 }

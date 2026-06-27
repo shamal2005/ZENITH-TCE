@@ -7,11 +7,20 @@ try {
   console.error("Failed to run copy-cesium.js:", e);
 }
 
+const getNitroPreset = () => {
+  if (process.env.VERCEL === "1") {
+    return "vercel";
+  }
+  return "node-server";
+};
+
 export default defineConfig({
   tanstackStart: {
     server: { entry: "server" },
     client: { entry: "main" },
-    nitro: true,
+  },
+  nitro: {
+    preset: getNitroPreset(),
   },
   vite: {
     define: {

@@ -1,10 +1,22 @@
-import { useEffect, useRef, useState, Fragment } from 'react';
+import { useEffect, useRef, useState, Fragment, useMemo } from 'react';
 import * as Cesium from 'cesium';
-import { Viewer, ImageryLayer, Entity, BillboardGraphics, CylinderGraphics, PointGraphics } from 'resium';
+import { Viewer, ImageryLayer, Entity, BillboardGraphics, CylinderGraphics, PointGraphics, PolylineGraphics } from 'resium';
 import { useSpacecraftTracking } from '../hooks/useSpacecraftTracking';
 import { useOrbitalDebris } from '../hooks/useOrbitalDebris';
 
 Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN ?? '';
+
+const SHARD_SVGS = [
+  `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><polygon points="3,6 12,2 14,13 4,11" fill="%2394a3b8" stroke="%23475569" stroke-width="1.5"/></svg>`,
+  `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><polygon points="2,8 8,3 13,8 9,14 3,11" fill="%23cbd5e1" stroke="%2364748b" stroke-width="1.5"/></svg>`,
+  `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><polygon points="4,2 12,4 14,12 8,14 2,8" fill="%2364748b" stroke="%23334155" stroke-width="1.5"/></svg>`
+];
+
+const FLASH_SVG = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="%23ffffff" stop-opacity="1"/><stop offset="30%" stop-color="%23fef08a" stop-opacity="0.9"/><stop offset="70%" stop-color="%23f97316" stop-opacity="0.4"/><stop offset="100%" stop-color="%23ef4444" stop-opacity="0"/></radialGradient><circle cx="64" cy="64" r="60" fill="url(%23g)"/></svg>`;
+
+const SHOCKWAVE_SVG = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><circle cx="64" cy="64" r="60" fill="none" stroke="%23f8fafc" stroke-width="3" opacity="0.9"/></svg>`;
+
+const baseSpeed = 1.8;
 
 // Low-level WebGL context options must be defined statically to prevent Resium
 // from recreating the Viewer instance on every render cycle.
@@ -27,6 +39,9 @@ interface GlobeViewProps {
   selectedFeaturedObjectId?: string | null;
   onSelectFeaturedObject?: (id: string | null) => void;
   isKessler?: boolean;
+  kesslerSimState?: 'idle' | 'initializing' | 'countdown' | 'frozen' | 'collision_sequence' | 'impact' | 'debris_drifting';
+  kesslerCountdown?: number;
+  kesslerCollisionStartTime?: number;
 }
 
 export default function GlobeView({ 
@@ -40,6 +55,9 @@ export default function GlobeView({
   selectedFeaturedObjectId = null,
   onSelectFeaturedObject,
   isKessler = false,
+  kesslerSimState = 'idle',
+  kesslerCountdown = 5,
+  kesslerCollisionStartTime = 0,
 }: GlobeViewProps) {
   const { spacecrafts } = useSpacecraftTracking();
   const { debris } = useOrbitalDebris(isGraveyard);
@@ -92,23 +110,156 @@ export default function GlobeView({
   }, [isKessler]);
   const wasKesslerRef = useRef(false);
   const originalDoubleClickRef = useRef<any>(null);
-
   const [kesslerSatellitesWithProperties, setKesslerSatellitesWithProperties] = useState<any[]>([]);
+
+  const kesslerSimStateRef = useRef(kesslerSimState);
+  const kesslerCountdownRef = useRef(kesslerCountdown);
+  const kesslerCollisionStartTimeRef = useRef(kesslerCollisionStartTime);
+  const freezeSecondsRef = useRef<number | null>(null);
+
+  const [polylinePositions, setPolylinePositions] = useState<any>(null);
+  const [polylineMaterial, setPolylineMaterial] = useState<any>(null);
+  const [midpointPosition, setMidpointPosition] = useState<Cesium.Cartesian3 | null>(null);
+  const [kesslerDebris, setKesslerDebris] = useState<any[]>([]);
+
+  useEffect(() => {
+    kesslerSimStateRef.current = kesslerSimState;
+    if (kesslerSimState === 'frozen' && freezeSecondsRef.current === null && viewer) {
+      const time = viewer.clock.currentTime;
+      const elapsed = Cesium.JulianDate.secondsDifference(time, viewer.clock.startTime);
+      freezeSecondsRef.current = elapsed;
+    } else if (kesslerSimState !== 'frozen') {
+      freezeSecondsRef.current = null;
+    }
+  }, [kesslerSimState, viewer]);
+
+  useEffect(() => {
+    kesslerCountdownRef.current = kesslerCountdown;
+  }, [kesslerCountdown]);
+
+  useEffect(() => {
+    kesslerCollisionStartTimeRef.current = kesslerCollisionStartTime;
+  }, [kesslerCollisionStartTime]);
+
+  useEffect(() => {
+    const featACarto = Cesium.Cartographic.fromDegrees(-95.0, 39.5, 680000);
+    const featAPos = Cesium.Ellipsoid.WGS84.cartographicToCartesian(featACarto);
+
+    const featBCarto = Cesium.Cartographic.fromDegrees(-65.0, 36.5, 620000);
+    const featBPos = Cesium.Ellipsoid.WGS84.cartographicToCartesian(featBCarto);
+
+    const M = Cesium.Cartesian3.multiplyByScalar(
+      Cesium.Cartesian3.add(featAPos, featBPos, new Cesium.Cartesian3()),
+      0.5,
+      new Cesium.Cartesian3()
+    );
+    setMidpointPosition(M);
+  }, []);
+
+  const flashScaleProperty = useMemo(() => {
+    return new Cesium.CallbackProperty(() => {
+      const elapsed = Date.now() - kesslerCollisionStartTimeRef.current - 2000;
+      if (elapsed < 0) return 0.0;
+      const progress = elapsed / 600;
+      if (progress > 1.0) return 0.0;
+      return 6.0 * (1.0 - progress);
+    }, false);
+  }, []);
+
+  const shockwaveScaleProperty = useMemo(() => {
+    return new Cesium.CallbackProperty(() => {
+      const elapsed = Date.now() - kesslerCollisionStartTimeRef.current - 2000;
+      if (elapsed < 0) return 0.0;
+      const progress = elapsed / 800;
+      if (progress > 1.0) return 0.0;
+      return 12.0 * progress;
+    }, false);
+  }, []);
+
+  const shockwaveColorProperty = useMemo(() => {
+    return new Cesium.CallbackProperty(() => {
+      const elapsed = Date.now() - kesslerCollisionStartTimeRef.current - 2000;
+      if (elapsed < 0) return Cesium.Color.WHITE.withAlpha(0.0);
+      const progress = elapsed / 800;
+      if (progress > 1.0) return Cesium.Color.WHITE.withAlpha(0.0);
+      return Cesium.Color.WHITE.withAlpha(0.85 * (1.0 - progress));
+    }, false);
+  }, []);
+
+  useEffect(() => {
+    if (!viewer) return;
+
+    const positions = new Cesium.CallbackProperty((time) => {
+      const satA = viewer.entities.getById('kessler-feat-a');
+      const satB = viewer.entities.getById('kessler-feat-b');
+      if (satA && satB && satA.position && satB.position) {
+        const posA = satA.position.getValue(time);
+        const posB = satB.position.getValue(time);
+        if (posA && posB) {
+          return [posA, posB];
+        }
+      }
+      return [];
+    }, false);
+
+    const material = new Cesium.ColorMaterialProperty(
+      new Cesium.CallbackProperty(() => {
+        const active = kesslerSimStateRef.current !== 'idle';
+        const elapsed = Date.now() % 1200;
+        const progress = elapsed / 1200;
+        const pulse = 0.4 + 0.6 * Math.sin(progress * Math.PI * 2);
+        return Cesium.Color.fromCssColorString('#ef4444').withAlpha(pulse);
+      }, false)
+    );
+
+    setPolylinePositions(positions);
+    setPolylineMaterial(material);
+  }, [viewer]);
+
+  useEffect(() => {
+    if (kesslerSimState === 'impact' && midpointPosition) {
+      const debrisList = [];
+      for (let i = 0; i < 45; i++) {
+        const dir = new Cesium.Cartesian3(
+          Math.random() - 0.5,
+          Math.random() - 0.5,
+          Math.random() - 0.5
+        );
+        Cesium.Cartesian3.normalize(dir, dir);
+        const speed = 4000 + Math.random() * 14000;
+        const velocity = Cesium.Cartesian3.multiplyByScalar(dir, speed, new Cesium.Cartesian3());
+
+        const spawnTime = Date.now();
+        const positionProperty = new Cesium.CallbackProperty(() => {
+          const elapsedSec = (Date.now() - spawnTime) / 1000;
+          const offset = Cesium.Cartesian3.multiplyByScalar(velocity, elapsedSec, new Cesium.Cartesian3());
+          return Cesium.Cartesian3.add(midpointPosition, offset, new Cesium.Cartesian3());
+        }, false);
+
+        debrisList.push({
+          id: `kessler-debris-${i}`,
+          positionProperty,
+          image: SHARD_SVGS[i % 3],
+        });
+      }
+      setKesslerDebris(debrisList);
+    } else if (kesslerSimState === 'idle') {
+      setKesslerDebris([]);
+    }
+  }, [kesslerSimState, midpointPosition]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !viewer) return;
 
     const list = [];
-    const baseSpeed = 1.8; // degrees per second, makes a full orbit ~200 seconds (3.3 mins)
-
     // Aegis-7 (Collision Pair A)
     list.push({
       id: "kessler-feat-a",
       name: "Aegis-7",
       isFeatured: true,
-      altitude: 650000, // 650 km
-      latBase: 38.0, // aligned near the Northern horizon peak
-      inclination: 8.0, // slight diagonal tilt
+      altitude: 680000, // 680 km (staggered slightly higher)
+      latBase: 39.5, // staggered latitude
+      inclination: 7.0, // slight tilt variation
       initialLon: -95.0, // starting position visible on the left-center
       speed: 1.0,
       phaseOffset: 0.0,
@@ -119,9 +270,9 @@ export default function GlobeView({
       id: "kessler-feat-b",
       name: "Cosmos-2489",
       isFeatured: true,
-      altitude: 650000,
-      latBase: 38.0,
-      inclination: 8.0,
+      altitude: 620000, // 620 km (staggered slightly lower)
+      latBase: 36.5, // staggered latitude
+      inclination: 9.0, // slight tilt variation
       initialLon: -65.0, // starting position visible on the right-center
       speed: 1.0,
       phaseOffset: Math.PI, // opposite phase in the path wave (tandem flight)
@@ -161,45 +312,99 @@ export default function GlobeView({
     }
 
     const processed = list.map(sat => {
-      // 1. Position Callback Property (slow continuous revolution around the horizon)
+      // 1. Position Callback Property (slow continuous revolution around the horizon; featured satellites approach midpoint on simulation active)
       const positionProperty = new Cesium.CallbackProperty((time) => {
         if (!time || !viewer?.clock?.startTime) return new Cesium.Cartesian3();
-        const seconds = Cesium.JulianDate.secondsDifference(time, viewer.clock.startTime);
-
-        // Revolve longitude slowly
-        const lonAngle = sat.initialLon + seconds * sat.speed * baseSpeed;
         
-        // Wrap longitude to [-180, 180]
-        let lon = lonAngle % 360;
-        if (lon > 180) lon -= 360;
-        if (lon < -180) lon += 360;
+        let seconds = Cesium.JulianDate.secondsDifference(time, viewer.clock.startTime);
+        if (kesslerSimStateRef.current === 'frozen' && freezeSecondsRef.current !== null) {
+          seconds = freezeSecondsRef.current;
+        }
 
-        // Compute tilted wave latitude
-        const lat = sat.latBase + sat.inclination * Math.sin(lonAngle * Math.PI / 180 + sat.phaseOffset);
+        // Standard satellites revolve normally
+        if (!sat.isFeatured) {
+          const lonAngle = sat.initialLon + seconds * sat.speed * baseSpeed;
+          let lon = lonAngle % 360;
+          if (lon > 180) lon -= 360;
+          if (lon < -180) lon += 360;
 
-        const carto = Cesium.Cartographic.fromDegrees(lon, lat, sat.altitude);
-        return Cesium.Ellipsoid.WGS84.cartographicToCartesian(carto);
+          const lat = sat.latBase + sat.inclination * Math.sin(lonAngle * Math.PI / 180 + sat.phaseOffset);
+          const carto = Cesium.Cartographic.fromDegrees(lon, lat, sat.altitude);
+          return Cesium.Ellipsoid.WGS84.cartographicToCartesian(carto);
+        }
+
+        // Featured satellites: calculate static start position
+        const startCarto = Cesium.Cartographic.fromDegrees(sat.initialLon, sat.latBase, sat.altitude);
+        const startPos = Cesium.Ellipsoid.WGS84.cartographicToCartesian(startCarto);
+
+        // Precalculated midpoint coordinates
+        const featACarto = Cesium.Cartographic.fromDegrees(-95.0, 39.5, 680000);
+        const featAPos = Cesium.Ellipsoid.WGS84.cartographicToCartesian(featACarto);
+        const featBCarto = Cesium.Cartographic.fromDegrees(-65.0, 36.5, 620000);
+        const featBPos = Cesium.Ellipsoid.WGS84.cartographicToCartesian(featBCarto);
+        const midpoint = Cesium.Cartesian3.multiplyByScalar(
+          Cesium.Cartesian3.add(featAPos, featBPos, new Cesium.Cartesian3()),
+          0.5,
+          new Cesium.Cartesian3()
+        );
+
+        // Check if approaching
+        if (kesslerSimStateRef.current === 'collision_sequence' || kesslerSimStateRef.current === 'impact' || kesslerSimStateRef.current === 'debris_drifting') {
+          const elapsed = Date.now() - kesslerCollisionStartTimeRef.current;
+          if (elapsed >= 2000) {
+            return midpoint;
+          } else if (elapsed >= 500) {
+            const p = (elapsed - 500) / 1500;
+            const pEased = p * p * (3 - 2 * p); // smoothstep easing
+            return Cesium.Cartesian3.lerp(startPos, midpoint, pEased, new Cesium.Cartesian3());
+          }
+        }
+
+        return startPos;
       }, false);
 
-      // 2. Color/Alpha Callback Property (featured satellite amber pulse, standard white)
+      // 2. Color/Alpha Callback Property (featured satellite amber pulse, standard white; intensifies glow as it approaches)
       const colorProperty = new Cesium.CallbackProperty(() => {
         if (sat.isFeatured) {
-          const elapsed = Date.now() % 2500;
-          const progress = elapsed / 2500;
-          const pulseGlow = 0.75 + 0.25 * Math.sin(progress * Math.PI * 2);
-          return Cesium.Color.fromCssColorString('#f59e0b').withAlpha(pulseGlow);
+          const active = kesslerSimStateRef.current !== 'idle';
+          const elapsed = Date.now() % (active ? 1000 : 2500);
+          const progress = elapsed / (active ? 1000 : 2500);
+          
+          let pulseGlow = active 
+            ? 0.55 + 0.45 * Math.sin(progress * Math.PI * 2)
+            : 0.75 + 0.25 * Math.sin(progress * Math.PI * 2);
+
+          // Intensify glow even further during the active convergence approach
+          if (kesslerSimStateRef.current === 'collision_sequence') {
+            const timeSinceStart = Date.now() - kesslerCollisionStartTimeRef.current;
+            if (timeSinceStart >= 500 && timeSinceStart < 2000) {
+              const approachProgress = (timeSinceStart - 500) / 1500;
+              // Gradually push alpha to solid glowing orange-white as they near impact
+              pulseGlow = pulseGlow * (1 - approachProgress) + 1.0 * approachProgress;
+            } else if (timeSinceStart >= 2000) {
+              pulseGlow = 1.0;
+            }
+          }
+
+          const colorStr = active ? '#fbbf24' : '#f59e0b';
+          return Cesium.Color.fromCssColorString(colorStr).withAlpha(pulseGlow);
         } else {
           return Cesium.Color.WHITE.withAlpha(0.95);
         }
       }, false);
 
-      // 3. Dynamic Scale (Featured satellites pulse at 25-30% larger size than standard)
+      // 3. Dynamic Scale (Featured satellites pulse at 25-30% larger size than standard; 10% larger during simulation active)
       let scaleProperty = undefined as any;
       if (sat.isFeatured) {
         scaleProperty = new Cesium.CallbackProperty(() => {
-          const elapsed = Date.now() % 2500;
-          const progress = elapsed / 2500;
-          return 0.95 + 0.10 * Math.sin(progress * Math.PI * 2); // average 1.025 (standard scale is 0.75)
+          const active = kesslerSimStateRef.current !== 'idle';
+          const elapsed = Date.now() % (active ? 1000 : 2500);
+          const progress = elapsed / (active ? 1000 : 2500);
+          if (active) {
+            return 1.05 + 0.12 * Math.sin(progress * Math.PI * 2); // average 1.11 (10% larger than baseline)
+          } else {
+            return 0.95 + 0.10 * Math.sin(progress * Math.PI * 2); // average 1.00
+          }
         }, false);
       }
 
@@ -2029,7 +2234,7 @@ export default function GlobeView({
     }}>
       {/* Transparent Viewer positioned above the background star layer */}
       <div 
-        className={`globe-viewer-wrapper ${targetLocation ? "has-target" : ""} ${isGraveyard ? "in-graveyard" : ""} ${selectedFeaturedObjectId ? "has-featured" : ""} ${isKessler ? "in-kessler" : ""}`}
+        className={`globe-viewer-wrapper ${targetLocation ? "has-target" : ""} ${isGraveyard ? "in-graveyard" : ""} ${selectedFeaturedObjectId ? "has-featured" : ""} ${isKessler ? "in-kessler" : ""} ${kesslerSimState === 'impact' ? "camera-shake-active" : ""}`}
         style={{ 
           opacity: (active && isGlobeReady) ? 1 : 0,
         }}
@@ -2057,6 +2262,12 @@ export default function GlobeView({
           {/* Kessler Simulation Satellites */}
           {isKessler && kesslerSatellitesWithProperties.map((sat) => {
             const isFeatured = sat.isFeatured;
+            
+            // Hide featured satellites after impact occurs
+            if (isFeatured && (kesslerSimState === 'impact' || kesslerSimState === 'debris_drifting')) {
+              return null;
+            }
+
             const img = isFeatured ? kesslerFeaturedSatImage : kesslerStandardSatImage;
 
             if (!img) return null;
@@ -2078,6 +2289,65 @@ export default function GlobeView({
               </Entity>
             );
           })}
+
+          {/* Crimson Connection Line between featured satellites representing predicted collision path */}
+          {isKessler && (kesslerSimState === 'countdown' || kesslerSimState === 'frozen' || kesslerSimState === 'collision_sequence') && polylinePositions && polylineMaterial && (
+            <Entity id="kessler-trajectory-line">
+              <PolylineGraphics
+                positions={polylinePositions}
+                width={2.5}
+                material={polylineMaterial}
+              />
+            </Entity>
+          )}
+
+          {/* Impact White Flash and Shockwave */}
+          {isKessler && kesslerSimState === 'impact' && midpointPosition && (
+            <>
+              {/* White Radial Glow Flash */}
+              <Entity
+                id="kessler-collision-flash"
+                position={midpointPosition as any}
+              >
+                <BillboardGraphics
+                  image={FLASH_SVG}
+                  scale={flashScaleProperty as any}
+                  width={128}
+                  height={128}
+                />
+              </Entity>
+
+              {/* Shockwave expanding ring */}
+              <Entity
+                id="kessler-collision-shockwave"
+                position={midpointPosition as any}
+              >
+                <BillboardGraphics
+                  image={SHOCKWAVE_SVG}
+                  scale={shockwaveScaleProperty as any}
+                  color={shockwaveColorProperty as any}
+                  width={128}
+                  height={128}
+                />
+              </Entity>
+            </>
+          )}
+
+          {/* Kessler Collision Debris Cloud */}
+          {isKessler && (kesslerSimState === 'impact' || kesslerSimState === 'debris_drifting') && kesslerDebris.map((d) => (
+            <Entity
+              key={d.id}
+              id={d.id}
+              position={d.positionProperty as any}
+            >
+              <BillboardGraphics
+                image={d.image}
+                width={14}
+                height={14}
+                scale={1.0}
+              />
+            </Entity>
+          ))}
 
           {/* Orbital Debris Layer (glowing red points, orange rockets, gray satellites) in Graveyard Mode */}
           {isGraveyard && !isKessler && debris.map((d) => {
@@ -2323,6 +2593,35 @@ export default function GlobeView({
             </Entity>
           )}
         </Viewer>
+
+        {/* Kessler Mode Collision Warning Overlay */}
+        {isKessler && (kesslerSimState === 'countdown' || kesslerSimState === 'frozen') && (
+          <div className="absolute top-6 left-1/2 transform -translate-x-1/2 z-[100] flex flex-col items-center select-none pointer-events-none">
+            <div className="w-[280px] md:w-[320px] bg-black/75 backdrop-blur-md border border-red-500/30 rounded-xl px-4 py-3 shadow-[0_0_25px_rgba(239,68,68,0.2)] flex flex-col items-center">
+              <div className="flex items-center gap-1.5 justify-center">
+                <span className="text-red-500 text-sm animate-pulse">⚠</span>
+                <h4 className="text-red-400 font-bold text-xs md:text-sm tracking-wider uppercase font-inter">
+                  Collision Predicted
+                </h4>
+              </div>
+              <p className="text-slate-300 text-[10px] md:text-[11px] mt-1 text-center font-inter font-light">
+                Potential orbital intersection detected.
+              </p>
+
+              {/* Countdown display */}
+              {kesslerSimState === 'countdown' && (
+                <div className="flex flex-col items-center mt-3 pt-2.5 border-t border-red-500/10 w-full">
+                  <span className="text-slate-400 text-[9px] uppercase tracking-widest font-semibold font-inter">
+                    Collision in
+                  </span>
+                  <div key={kesslerCountdown} className="text-red-500 font-black text-3xl md:text-4xl mt-1.5 font-inter animate-countdown">
+                    {kesslerCountdown}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Hover Tooltip Overlay */}
